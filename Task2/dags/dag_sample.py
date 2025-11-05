@@ -1,66 +1,93 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.providers.postgres.operators.postgres import PostgresOperator
 from datetime import datetime
+import os
 import csv
+from decimal import Decimal
+import clickhouse_connect
 
-# Аргументы по умолчанию: владелец процесса и время отсчёта для задачи
 default_args = {
     'owner': 'airflow',
     'start_date': datetime(2024, 12, 1),
 }
 
-# Функция для чтения данных и генерации SQL-запросов
-def generate_insert_queries():
-    CSV_FILE_PATH = '/opt/airflow/sample_files/sample.csv'
-    OUTPUT_SQL_PATH = '/opt/airflow/dags/sql/insert_queries.sql'
-
-    with open(CSV_FILE_PATH, 'r') as csvfile:
-        csvreader = csv.reader(csvfile)
-        insert_queries = []
-        next(csvreader)  # пропускаем заголовок
-        for row in csvreader:
-            insert_query = f"""
-            INSERT INTO sample_table (id, order_number, total, discount, buyer_id)
-            VALUES ({row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]});
-            """
-            insert_queries.append(insert_query)
-
-    with open(OUTPUT_SQL_PATH, 'w') as f:
-        f.write('\n'.join(insert_queries))
-
-# Определяем DAG
-with DAG('csv_to_postgres_dag',
-         default_args=default_args, #аргументы по умолчанию в начале скрипта
-         schedule_interval='@once', #запускаем один раз
-         catchup=False) as dag: #предотвращает повторное выполнение DAG для пропущенных расписаний.
-
-    # Создаём таблицу в PostgreSQL
-    create_table = PostgresOperator(
-        task_id='create_table', #идентификатор задачи
-        postgres_conn_id='write_to_postgres',  # Название подключения
-        sql="""
-        DROP TABLE IF EXISTS sample_table;
-        CREATE TABLE sample_table (
-            id SERIAL PRIMARY KEY,
-            order_number BIGINT,
-            total NUMERIC(18,2),
-            discount NUMERIC(18,2),
-            buyer_id BIGINT
-        );
-        """
+def get_ch_client():
+    host = os.environ.get('CLICKHOUSE_HOST', 'clickhouse')
+    port = int(os.environ.get('CLICKHOUSE_PORT', '8123'))  # HTTP порт
+    user = os.environ.get('CLICKHOUSE_USER', 'airflow')
+    password = os.environ.get('CLICKHOUSE_PASSWORD', 'airflow')
+    database = os.environ.get('CLICKHOUSE_DB', 'airflow_results')
+    client = clickhouse_connect.get_client(
+        host=host,
+        port=port,
+        username=user,
+        password=password,
+        database=database,
     )
-    #Опеределяем оператор для вставки данных
-    generate_queries = PythonOperator(
-    task_id='generate_insert_queries',
-    python_callable=generate_insert_queries
+    return client
+
+def create_clickhouse_db_and_table():
+    client = get_ch_client()
+    # на случай, если БД ещё нет
+    client.command('CREATE DATABASE IF NOT EXISTS airflow_results')
+    # создаём таблицу (типизация под CSV: числа и 2 знака после запятой)
+    ddl = """
+    CREATE TABLE IF NOT EXISTS airflow_results.sample_table
+    (
+        id UInt64,
+        order_number UInt64,
+        total Decimal(18,2),
+        discount Decimal(18,2),
+        buyer_id UInt64
+    )
+    ENGINE = MergeTree
+    ORDER BY id
+    """
+    client.command(ddl)
+
+def load_csv_to_clickhouse():
+    csv_path = '/opt/airflow/sample_files/sample.csv'
+    client = get_ch_client()
+
+    batch = []
+    batch_size = 5000  # можно менять
+    columns = ['id', 'order_number', 'total', 'discount', 'buyer_id']
+
+    with open(csv_path, 'r') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)  # пропустить заголовок, если он есть
+        for row in reader:
+            # преобразование типов под DDL
+            rec = [
+                int(row[0]),
+                int(row[1]),
+                Decimal(row[2]) if row[2] else Decimal('0'),
+                Decimal(row[3]) if row[3] else Decimal('0'),
+                int(row[4])
+            ]
+            batch.append(rec)
+            if len(batch) >= batch_size:
+                client.insert('sample_table', batch, column_names=columns)
+                batch.clear()
+
+    if batch:
+        client.insert('sample_table', batch, column_names=columns)
+
+with DAG(
+    'csv_to_clickhouse_dag',
+    default_args=default_args,
+    schedule_interval='@once',
+    catchup=False
+) as dag:
+
+    create_table = PythonOperator(
+        task_id='create_clickhouse_table',
+        python_callable=create_clickhouse_db_and_table
     )
 
-    #Запускаем выполнение оператора PostgresOperator
-    run_insert_queries = PostgresOperator(
-        task_id='run_insert_queries',
-        postgres_conn_id='write_to_postgres',  # Название подключения к PostgreSQL в Airflow UI
-        sql='sql/insert_queries.sql'
+    load_csv = PythonOperator(
+        task_id='load_csv_to_clickhouse',
+        python_callable=load_csv_to_clickhouse
     )
-    create_table>>generate_queries>>run_insert_queries
-    # Тут дальше можно продолжать пайплайн
+
+    create_table >> load_csv

@@ -1,1 +1,2 @@
 psycopg2-binary
+clickhouse-connect>=0.7,<0.8
