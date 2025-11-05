@@ -11,34 +11,39 @@ default_args = {
     'start_date': datetime(2024, 12, 1),
 }
 
-def get_ch_client():
+def get_ch_client(database=None):
     host = os.environ.get('CLICKHOUSE_HOST', 'clickhouse')
-    port = int(os.environ.get('CLICKHOUSE_PORT', '8123'))  # HTTP порт
+    port = int(os.environ.get('CLICKHOUSE_PORT', '8123'))
     user = os.environ.get('CLICKHOUSE_USER', 'airflow')
     password = os.environ.get('CLICKHOUSE_PASSWORD', 'airflow')
-    database = os.environ.get('CLICKHOUSE_DB', 'airflow_results')
-    client = clickhouse_connect.get_client(
+
+    db = database or os.environ.get('CLICKHOUSE_DB', 'airflow_results')
+    return clickhouse_connect.get_client(
         host=host,
         port=port,
         username=user,
         password=password,
-        database=database,
+        database=db,
     )
-    return client
 
 def create_clickhouse_db_and_table():
-    client = get_ch_client()
-    # на случай, если БД ещё нет
+    # сначала подключаемся к default
+    client = get_ch_client(database='default')
+
+    # создаем БД
     client.command('CREATE DATABASE IF NOT EXISTS airflow_results')
-    # создаём таблицу (типизация под CSV: числа и 2 знака после запятой)
+
+    # теперь подключаемся к нужной базе
+    client = get_ch_client(database='airflow_results')
+
     ddl = """
-    CREATE TABLE IF NOT EXISTS airflow_results.sample_table
+    CREATE TABLE IF NOT EXISTS sample_table
     (
         id UInt64,
         order_number UInt64,
         total Decimal(18,2),
         discount Decimal(18,2),
-        buyer_id UInt64
+        buyer_id String
     )
     ENGINE = MergeTree
     ORDER BY id
@@ -63,7 +68,7 @@ def load_csv_to_clickhouse():
                 int(row[1]),
                 Decimal(row[2]) if row[2] else Decimal('0'),
                 Decimal(row[3]) if row[3] else Decimal('0'),
-                int(row[4])
+                row[4]
             ]
             batch.append(rec)
             if len(batch) >= batch_size:
