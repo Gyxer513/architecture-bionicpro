@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   keycloak_db:
     image: postgres:14
@@ -20,7 +18,7 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -31,8 +29,8 @@ services:
       - keycloak_db
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: frontend
+      dockerfile: frontend/Dockerfile
     ports:
       - "3000:3000"
     environment:

@@ -16,13 +16,24 @@ const ReportPage: React.FC = () => {
       setLoading(true);
       setError(null);
 
+      console.log('Fetching report with token:', keycloak.token);
       const response = await fetch(`${process.env.REACT_APP_API_URL}/reports`, {
         headers: {
-          'Authorization': `Bearer ${keycloak.token}`
-        }
+          Authorization: `Bearer ${keycloak.token}`,
+        },
       });
 
-      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'report.pdf';
+      a.click();
+      window.URL.revokeObjectURL(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -51,7 +62,6 @@ const ReportPage: React.FC = () => {
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
       <div className="p-8 bg-white rounded-lg shadow-md">
         <h1 className="text-2xl font-bold mb-6">Usage Reports</h1>
-        
         <button
           onClick={downloadReport}
           disabled={loading}
@@ -61,7 +71,6 @@ const ReportPage: React.FC = () => {
         >
           {loading ? 'Generating Report...' : 'Download Report'}
         </button>
-
         {error && (
           <div className="mt-4 p-4 bg-red-100 text-red-700 rounded">
             {error}
